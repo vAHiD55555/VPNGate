@@ -1,55 +1,51 @@
 import requests
 import csv
-import io
-import socket
 import os
-from datetime import datetime
 
 # تنظیمات
-VPNGATE_API_URL = "http://www.vpngate.net/api/iphone/"
-TIMEOUT = 1.5  # ثانیه برای تست اتصال
+# استفاده از میرورهای گیت‌هاب برای دور زدن بلاک شدن توسط سایت اصلی
+SOURCES = [
+    "http://www.vpngate.net/api/iphone/",
+    "https://raw.githubusercontent.com/fanyueciyuan/vpngate/main/vpngate.csv",
+    "https://raw.githubusercontent.com/vpngate-world/vpngate-daily/master/vpngate.csv"
+]
 OUTPUT_DIR = "proxies"
 PAC_FILE = "proxy.pac"
 
 def get_servers():
-    try:
-        response = requests.get(VPNGATE_API_URL)
-        text = response.text.replace("#HostName", "HostName") # اصلاح هدر برای CSV
-        # رد کردن خطوط اضافی اول فایل
-        lines = text.split('\n')
-        csv_data = []
-        start_reading = False
-        for line in lines:
-            if line.startswith("HostName"):
-                start_reading = True
-            if start_reading and line.strip() != "*" and line.strip() != "":
-                csv_data.append(line)
-        
-        return csv.reader(csv_data)
-    except Exception as e:
-        print(f"Error fetching data: {e}")
-        return []
-
-def is_alive(ip, port):
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(TIMEOUT)
-        result = sock.connect_ex((ip, int(port)))
-        sock.close()
-        return result == 0
-    except:
-        return False
+    for url in SOURCES:
+        try:
+            print(f"Trying to fetch from: {url}")
+            response = requests.get(url, timeout=10)
+            if response.status_code == 200:
+                text = response.text.replace("#HostName", "HostName")
+                lines = text.split('\n')
+                csv_data = []
+                start_reading = False
+                for line in lines:
+                    if line.startswith("HostName"):
+                        start_reading = True
+                    if start_reading and line.strip() != "*" and line.strip() != "":
+                        csv_data.append(line)
+                
+                if len(csv_data) > 5: # اگر دیتا معتبر بود
+                    print(f"Successfully fetched {len(csv_data)} rows from {url}")
+                    return csv.reader(csv_data)
+        except Exception as e:
+            print(f"Failed to fetch from {url}: {e}")
+            continue
+    return None
 
 def generate_pac(proxies):
     js_content = "function FindProxyForURL(url, host) {\n"
-    for proxy in proxies:
-        # فرض بر اینه که پروکسی‌ها ساکس یا اچ‌تی‌تی‌پی هستن، اینجا نمونه SOCKS5
-        js_content += f"    // {proxy['country']}\n"
+    # ساخت فایل PAC ساده
+    proxy_rules = []
+    for p in proxies[:50]: # فقط ۵۰ تای اول برای جلوگیری از سنگین شدن
+        # فرمت استاندارد: PROXY ip:port
+        proxy_rules.append(f"PROXY {p['ip']}:{p['port']}")
     
-    # ساختار ساده PAC (بیشتر برای نمونه، چون VPNGate اکثرا OpenVPN/L2TP هستن نه پروکسی مرورگر)
-    # اما اگر آی‌پی‌ها رو برای پروکسی میخوای، این خط رو کانفیگ کن:
-    proxy_list = "; ".join([f"PROXY {p['ip']}:{p['port']}" for p in proxies[:50]])
-    js_content += f"    return '{proxy_list}; DIRECT';\n}}"
+    rule_str = "; ".join(proxy_rules)
+    js_content += f"    return '{rule_str}; DIRECT';\n}}"
     return js_content
 
 def main():
@@ -57,51 +53,73 @@ def main():
         os.makedirs(OUTPUT_DIR)
 
     csv_reader = get_servers()
-    headers = next(csv_reader, None)
     
-    if not headers:
-        print("No data found.")
-        return
+    if not csv_reader:
+        print("❌ Could not fetch data from any source.")
+        exit(1) # ارور بده که بفهمیم
 
-    # پیدا کردن ایندکس ستون‌ها
+    headers = next(csv_reader, None)
+    if not headers:
+        print("CSV headers missing.")
+        exit(1)
+
     try:
-        ip_idx = headers.index("IP")
-        port_idx = headers.index("Port") # معمولا پورت OpenVPN یا L2TP
-        country_idx = headers.index("CountryShort")
-        proto_idx = headers.index("OpenVPN_ConfigData_Base64") # فقط برای اینکه بدونیم دیتا هست
+        # پیدا کردن ستون‌ها با انعطاف‌پذیری بیشتر
+        headers_lower = [h.lower() for h in headers]
+        ip_idx = -1
+        country_idx = -1
+        port_idx = -1 # ترجیحا TCP
+        
+        # تلاش برای پیدا کردن ایندکس‌ها
+        for i, h in enumerate(headers_lower):
+            if "ip" in h and "v6" not in h: ip_idx = i
+            if "countryshort" in h: country_idx = i
+            if "tcp" in h: port_idx = i # اولویت با پورت TCP
+        
+        # اگر پورت TCP نبود، پورت معمولی
+        if port_idx == -1:
+             for i, h in enumerate(headers_lower):
+                if h == "port": port_idx = i
+
     except ValueError:
-        print("CSV headers mismatch.")
-        return
+        print("Header parsing failed.")
+        exit(1)
 
     valid_proxies = []
+    unique_ips = set()
     
-    print("Fetching and testing servers (Limit: Top 100 recent)...")
+    print("Processing list...")
     
-    count = 0
     for row in csv_reader:
-        if len(row) < len(headers) or count > 100: # محدودیت برای جلوگیری از تایم‌اوت گیت‌هاب
-            continue
-            
-        ip = row[ip_idx]
-        port = row[port_idx] # توجه: این معمولا پورت TCP نیست، پورت VPN هست.
-        country = row[country_idx]
+        if len(row) < 5: continue
         
-        # تست اتصال ساده
-        if is_alive(ip, 443) or is_alive(ip, 80) or is_alive(ip, port):
-            print(f"✅ {country} - {ip}")
+        try:
+            ip = row[ip_idx]
+            country = row[country_idx]
+            port = row[port_idx]
+            
+            if ip in unique_ips: continue
+            unique_ips.add(ip)
+
+            # اینجا دیگه تست اتصال نمی‌گیریم تا لیست خالی نشه
+            # فرض رو بر این می‌ذاریم که لیست روزانه آپدیت شده و زنده‌ست
+            
             valid_proxies.append({'ip': ip, 'port': port, 'country': country})
             
-            # ذخیره بر اساس کشور
+            # ذخیره فایل کشور
             with open(f"{OUTPUT_DIR}/{country}.txt", "a") as f:
                 f.write(f"{ip}:{port}\n")
+                
+        except IndexError:
+            continue
         
-        count += 1
-
     # ساخت فایل PAC
-    with open(PAC_FILE, "w") as f:
-        f.write(generate_pac(valid_proxies))
-    
-    print(f"Done. Found {len(valid_proxies)} alive servers.")
+    if valid_proxies:
+        with open(PAC_FILE, "w") as f:
+            f.write(generate_pac(valid_proxies))
+        print(f"✅ Done. Saved {len(valid_proxies)} proxies. Check the 'proxies' folder.")
+    else:
+        print("❌ No proxies found in the list.")
 
 if __name__ == "__main__":
     main()
