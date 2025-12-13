@@ -2,7 +2,7 @@ name: Update VPNGate List
 
 on:
   schedule:
-    - cron: '0 */6 * * *' # هر ۶ ساعت
+    - cron: '0 */1 * * *' # هر ۶ ساعت
   workflow_dispatch: # دکمه اجرای دستی
 
 permissions:
