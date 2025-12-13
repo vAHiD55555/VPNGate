@@ -1,0 +1,36 @@
+name: Update VPNGate List
+
+on:
+  schedule:
+    - cron: '0 */6 * * *' # هر ۶ ساعت
+  workflow_dispatch: # دکمه اجرای دستی
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Install Dependencies
+      run: |
+        pip install requests
+
+    - name: Run Script
+      run: python vpngate.py
+
+    - name: Commit and Push
+      uses: stefanzweifel/git-auto-commit-action@v5
+      with:
+        commit_message: "Updated VPN list [skip ci]"
+        branch: main
+        file_pattern: 'proxies/*.txt proxy.pac'
